@@ -1,99 +1,123 @@
+#!/usr/bin/env python3
+import sys
 import socket
 import threading
-import sys
+import time
 
-# --- CONFIGURATION ---
-PORT = 9999  # Le port utilisé pour la communication
-# ---------------------
+# Configuration par défaut
+PORT = 9999
+BUFFER_SIZE = 4096
 
-# Variable en RAM qui stocke le presse-papier actuel
-shared_clipboard = "[Presse-papier vide]"
+# Stockage en RAM
+clipboard_content = ""
 
 def start_server():
-    """Démarre un serveur en arrière-plan pour recevoir les 'push' de l'autre PC."""
-    global shared_clipboard
+    """Micro-service d'arrière-plan qui écoute les connexions entrantes."""
+    global clipboard_content
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Permet de réutiliser le port immédiatement après l'arrêt du script
+    # Permet de réutiliser le port immédiatement après l'arrêt
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
     try:
         server.bind(('0.0.0.0', PORT))
-        server.listen(1)
+        server.listen(5)
     except Exception as e:
-        print(\n[Erreur Serveur] Impossible de démarrer le serveur : {e})
-        sys.exit(1)
+        print(f"\n[Erreur Serveur] Impossible de démarrer le serveur sur le port {PORT}: {e}")
+        return
 
     while True:
         try:
-            conn, _ = server.accept()
-            # Reçoit les données (limité à ~1 Mo pour cet outil de secours)
-            data = conn.recv(1024 * 1024).decode('utf-8')
+            conn, addr = server.accept()
+            data = conn.recv(BUFFER_SIZE).decode('utf-8')
             if data:
-                shared_clipboard = data
+                if data.startswith("PUSH:"):
+                    # On extrait le texte et on overwrite le précédent
+                    clipboard_content = data[5:]
+                    conn.sendall(b"OK")
+                elif data == "PULL":
+                    # On renvoie le contenu actuel en RAM
+                    conn.sendall(clipboard_content.encode('utf-8'))
             conn.close()
-        except:
-            break
+        except Exception:
+            pass
 
-def send_push(target_ip, text):
-    """Envoie (push) le texte vers l'autre ordinateur."""
+def send_request(ip, message):
+    """Fonction utilitaire pour envoyer une commande à l'autre machine."""
     try:
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Timeout de 3 secondes pour éviter que le terminal ne freeze si le PC est déconnecté
-        client.settimeout(3.0)
-        client.connect((target_ip, PORT))
-        client.sendall(text.encode('utf-8'))
+        # Timeout court pour éviter de bloquer le terminal si l'autre est déco
+        client.settimeout(3.0) 
+        client.connect((ip, PORT))
+        client.sendall(message.encode('utf-8'))
+        response = client.recv(BUFFER_SIZE).decode('utf-8')
         client.close()
-        print("[OK] Texte envoyé.")
+        return response
     except Exception as e:
-        print(f"[Erreur Push] Impossible de joindre {target_ip}:{PORT} ({e})")
+        return f"[Erreur Connexion] Impossible de joindre {ip}:{PORT} ({e})"
 
 def main():
-    global shared_clipboard
-    
+    global clipboard_content
     if len(sys.argv) < 2:
-        print("Usage: python3 clipboard_emergency.py <IP_DE_L_AUTRE_PC>")
+        print("Usage:")
+        print("  Démarrer le mode interactif : python3 biclip.py <IP_AUTRE_MACHINE>")
+        print("  Commande directe (TTY)     : python3 biclip.py <IP_AUTRE_MACHINE> push \"votre texte\"")
+        print("  Commande directe (TTY)     : python3 biclip.py <IP_AUTRE_MACHINE> pull")
         sys.exit(1)
-        
+
     target_ip = sys.argv[1]
 
-    # Lancement du serveur dans un thread séparé pour écouter en arrière-plan
+    # Lancement du micro-service d'arrière-plan en tâche de fond (Thread)
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
+    
+    # Petite pause pour laisser le serveur s'initialiser
+    time.sleep(0.1)
 
-    print(f"--- Outil de secours Presse-papier démarré ---")
-    print(f"Écoute locale sur le port {PORT}")
-    print(f"Cible configurée : {target_ip}")
-    print("Commandes disponibles : 'push <texte>', 'pull', 'exit'\n")
+    # Mode Commande Directe (TTY / One-liner)
+    if len(sys.argv) > 2:
+        action = sys.argv[2].lower()
+        if action == "push" and len(sys.argv) > 3:
+            text_to_send = sys.argv[3]
+            # On met à jour notre RAM locale ET on push chez l'autre
+            clipboard_content = text_to_send
+            send_request(target_ip, f"PUSH:{text_to_send}")
+        elif action == "pull":
+            # On demande le texte de l'autre machine
+            res = send_request(target_ip, "PULL")
+            print(res)
+        else:
+            print("Commande TTY invalide.")
+        sys.exit(0)
 
-    # Boucle principale (Interface TTY)
+    # Mode Live User Texte (Interactif)
+    print(f"--- Biclip activé ---")
+    print(f"Connecté vers : {target_ip} | Port local d'écoute : {PORT}")
+    print("Commandes disponibles : push \"votre texte\" / pull / exit")
+    print("----------------------")
+
     while True:
         try:
-            user_input = input("> ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nFermeture...")
-            break
-
-        if not user_input:
-            continue
-
-        if user_input.lower() == 'exit':
-            break
-        elif user_input == 'pull':
-            print(shared_clipboard)
-        elif user_input.startswith('push '):
-            # On extrait le texte après le mot "push "
-            text_to_send = user_input[5:].strip()
-            # Retire les guillemets si l'utilisateur en a mis autour de son texte
-            if text_to_send.startswith('"') and text_to_send.endswith('"'):
-                text_to_send = text_to_send[1:-1]
-            elif text_to_send.startswith("'") and text_to_send.endswith("'"):
-                text_to_send = text_to_send[1:-1]
+            user_input = input("biclip> ").strip()
+            if not user_input:
+                continue
+            
+            if user_input.lower() == "exit":
+                break
+            
+            elif user_input.lower().startswith("push "):
+                # On récupère tout ce qui suit "push "
+                text_to_send = user_input[5:].strip('"\'') 
+                clipboard_content = text_to_send
+                send_request(target_ip, f"PUSH:{text_to_send}")
                 
-            # Met à jour son propre presse-papier et l'envoie à l'autre
-            shared_clipboard = text_to_send
-            send_push(target_ip, text_to_send)
-        else:
-            print("Commande inconnue. Utilisez 'push <texte>', 'pull' ou 'exit'.")
+            elif user_input.lower() == "pull":
+                res = send_request(target_ip, "PULL")
+                print(res)
+                
+            else:
+                print("Commande inconnue. Utilisez 'push \"texte\"', 'pull' ou 'exit'.")
+        except (KeyboardInterrupt, EOFError):
+            print("\nFermeture de Biclip.")
+            break
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
