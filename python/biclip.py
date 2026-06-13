@@ -41,13 +41,16 @@ def start_server():
             pass
 
 def send_request(ip, message):
-    """Fonction utilitaire pour envoyer une commande à l'autre machine."""
+    """Fonction utilitaire optimisée pour les environnements Live."""
     try:
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Timeout court pour éviter de bloquer le terminal si l'autre est déco
-        client.settimeout(3.0) 
+        client.settimeout(5.0) # Augmenté à 5 secondes pour le Wifi
         client.connect((ip, PORT))
         client.sendall(message.encode('utf-8'))
+        
+        # On signale qu'on a fini d'écrire pour forcer l'autre côté à répondre
+        client.shutdown(socket.SHUT_WR) 
+        
         response = client.recv(BUFFER_SIZE).decode('utf-8')
         client.close()
         return response
